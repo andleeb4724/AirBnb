@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"D:\\\\Andy\\\\Practice\\\\Asp.Net Core_practice\\\\Asp.Net Core_practice\\\\AirBnb_Project\\\\AirBnb\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)"
+    ]
+  }
+}
