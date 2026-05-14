@@ -1,32 +1,46 @@
-﻿using AirBnb.Data;
-using AirBnb.Dtos;
-using AirBnb.Entities;
-using AirBnb.Interface;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using AirBnb.Core.Common;
+using AirBnb.Core.DTOs.Property;
+using AirBnb.Core.Entities;
+using AirBnb.Core.Interfaces;
+using AirBnb.Core.Interfaces.Services;
+using AirBnb.Infrastructure.Extensions;
 
 namespace AirBnb.Services
 {
-    public class PropertyService : IPropertyInterface
+    public class PropertyService : IPropertyService
     {
-        private readonly AppDbContext _context;
-        private readonly AzureBlobStorageService _azureBlobStorageService;
+        private readonly IUnitOfWork _uow;
+        private readonly IBlobStorageService _blobService;
 
-        public PropertyService(AppDbContext context, AzureBlobStorageService azureBlobStorageService)
+        public PropertyService(IUnitOfWork uow, IBlobStorageService blobService)
         {
-            _context = context;
-            _azureBlobStorageService = azureBlobStorageService;
+            _uow = uow;
+            _blobService = blobService;
         }
 
-        public async Task<IActionResult> AddProperty([FromForm] CreatePropertyDto dto)
+        public async Task<ServiceResult<IReadOnlyList<PropertyResponseDto>>> GetAllAsync()
         {
-            string imageUrl = null;
+            var properties = await _uow.Properties.GetPropertiesWithHostAsync();
+            var result = properties.Select(p => p.ToResponseDto()).ToList();
+            return ServiceResult<IReadOnlyList<PropertyResponseDto>>.Ok(result);
+        }
+
+        public async Task<ServiceResult<PropertyResponseDto>> GetByIdAsync(int id)
+        {
+            var property = await _uow.Properties.GetPropertyWithHostAsync(id);
+            if (property is null)
+                return ServiceResult<PropertyResponseDto>.NotFound("Property not found.");
+
+            return ServiceResult<PropertyResponseDto>.Ok(property.ToResponseDto());
+        }
+
+        public async Task<ServiceResult<PropertyResponseDto>> CreateAsync(CreatePropertyDto dto, string hostId)
+        {
+            string? imageUrl = null;
             if (dto.ImageFile != null)
             {
-                using (var stream = dto.ImageFile.OpenReadStream())
-                {
-                    imageUrl = await _azureBlobStorageService.UploadImageAsync(stream, dto.ImageFile.FileName);
-                }
+                using var stream = dto.ImageFile.OpenReadStream();
+                imageUrl = await _blobService.UploadImageAsync(stream, dto.ImageFile.FileName);
             }
 
             var property = new Property
@@ -35,86 +49,70 @@ namespace AirBnb.Services
                 Description = dto.Description,
                 PricePerNight = dto.PricePerNight,
                 ImageUrl = imageUrl,
-                HostId = "15383F0B-069C-48E5-80B7-82FEEF01E50D"
+                HostId = hostId
             };
 
-            _context.Properties.Add(property);
-            await _context.SaveChangesAsync();
+            await _uow.Properties.AddAsync(property);
+            await _uow.CompleteAsync();
 
-            return new OkObjectResult(property);
+            var saved = await _uow.Properties.GetPropertyWithHostAsync(property.Id);
+            return ServiceResult<PropertyResponseDto>.Ok(saved!.ToResponseDto());
         }
 
-        public async Task<IActionResult> GetAllProperties()
+        public async Task<ServiceResult<PropertyResponseDto>> UpdateAsync(int id, UpdatePropertyDto dto, string hostId)
         {
-            var properties = await _context.Properties.ToListAsync();
-            return new OkObjectResult(properties);
-        }
+            var property = await _uow.Properties.GetByIdAsync(id);
+            if (property is null)
+                return ServiceResult<PropertyResponseDto>.NotFound("Property not found.");
 
-        public async Task<IActionResult> GetPropertiesById(int id)
-        {
-            var property = await _context.Properties.FindAsync(id);
-            if (property == null)
-            {
-                return new NotFoundObjectResult("Property Not Found");
-            }
-            return new OkObjectResult(property);
-        }
+            if (property.HostId != hostId)
+                return ServiceResult<PropertyResponseDto>.Forbidden("You are not the owner of this property.");
 
-        public async Task<IActionResult> UpdateProperty(int id, [FromBody] UpdatePropertyDto dto)
-        {
-            string imageUrl = null;
             if (dto.ImageFile != null)
             {
-                using (var stream = dto.ImageFile.OpenReadStream())
-                {
-                    imageUrl = await _azureBlobStorageService.UploadImageAsync(stream, dto.ImageFile.FileName);
-                }
-            }
-            var property = await _context.Properties.FindAsync(id);
-            if (property == null)
-            {
-                return new NotFoundObjectResult("Property not found");
+                using var stream = dto.ImageFile.OpenReadStream();
+                property.ImageUrl = await _blobService.UploadImageAsync(stream, dto.ImageFile.FileName);
             }
 
             property.Title = dto.Title;
             property.Description = dto.Description;
             property.PricePerNight = dto.PricePerNight;
+
+            await _uow.Properties.UpdateAsync(property);
+            await _uow.CompleteAsync();
+
+            var updated = await _uow.Properties.GetPropertyWithHostAsync(id);
+            return ServiceResult<PropertyResponseDto>.Ok(updated!.ToResponseDto());
+        }
+
+        public async Task<ServiceResult<bool>> DeleteAsync(int id, string hostId)
+        {
+            var property = await _uow.Properties.GetByIdAsync(id);
+            if (property is null)
+                return ServiceResult<bool>.NotFound("Property not found.");
+
+            if (property.HostId != hostId)
+                return ServiceResult<bool>.Forbidden("You are not the owner of this property.");
+
+            await _uow.Properties.DeleteAsync(property);
+            await _uow.CompleteAsync();
+
+            return ServiceResult<bool>.Ok(true);
+        }
+
+        public async Task<ServiceResult<string>> UploadImageAsync(int propertyId, Stream fileStream, string fileName)
+        {
+            var property = await _uow.Properties.GetByIdAsync(propertyId);
+            if (property is null)
+                return ServiceResult<string>.NotFound("Property not found.");
+
+            var imageUrl = await _blobService.UploadImageAsync(fileStream, $"{propertyId}/{fileName}");
             property.ImageUrl = imageUrl;
-            await _context.SaveChangesAsync();
 
-            return new OkObjectResult(property);
-        }
+            await _uow.Properties.UpdateAsync(property);
+            await _uow.CompleteAsync();
 
-        public async Task<IActionResult> DeleteProperty(int id)
-        {
-            var property = await _context.Properties.FindAsync(id);
-            if (property == null)
-            {
-                return new NotFoundObjectResult("Property not found");
-            }
-
-            _context.Properties.Remove(property);
-            await _context.SaveChangesAsync();
-
-            return new OkObjectResult("Property deleted successfully");
-        }
-
-        public async Task<IActionResult> UploadPropertyImage(int id, IFormFile file, AzureBlobStorageService blobStorageService)
-        {
-            if (file == null || file.Length == 0)
-                return new BadRequestObjectResult("File is empty.");
-
-            using var stream = file.OpenReadStream();
-            string imageUrl = await blobStorageService.UploadImageAsync(stream, $"{id}/{file.FileName}");
-
-            var property = await _context.Properties.FindAsync(id);
-            if (property == null) return new NotFoundObjectResult("Property not found");
-
-            var propertyImage = new PropertyImage { PropertyId = id, ImageUrl = imageUrl };
-            _context.PropertyImages.Add(propertyImage);
-            await _context.SaveChangesAsync();
-
-            return new OkObjectResult(imageUrl);
+            return ServiceResult<string>.Ok(imageUrl);
         }
     }
 }
